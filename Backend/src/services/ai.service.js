@@ -38,63 +38,41 @@ Output Structure:
 💡 Improvements & Technical Explanation
 `;
 
-// Candidate models in preference order
-const CANDIDATE_MODELS = [
-    process.env.GEMINI_MODEL || "gemini-3.8-flash",
-    "gemini-3.8-pro",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro"
-].filter(Boolean);
-
-const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-async function callModelWithRetry(modelName, prompt, maxRetries = 2) {
-    let lastError = null;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            if (attempt > 0) {
-                const backoffMs = attempt * 1500;
-                console.log(`[Gemini] Retrying ${modelName} (attempt ${attempt + 1}) after ${backoffMs}ms...`);
-                await wait(backoffMs);
-            }
-            const model = genAI.getGenerativeModel({
-                model: modelName,
-                systemInstruction: SYSTEM_INSTRUCTION
-            });
-            const result = await model.generateContent(prompt);
-            return result.response.text();
-        } catch (err) {
-            lastError = err;
-            const isTransient = err.message && (
-                err.message.includes("503") || 
-                err.message.includes("high demand") || 
-                err.message.includes("ResourceExhausted") || 
-                err.message.includes("429")
-            );
-            
-            // If it's a 404 model not found or invalid key, break early
-            if (!isTransient) {
-                console.warn(`[Gemini] ${modelName} returned permanent error: ${err.message}`);
-                break;
-            }
-            console.warn(`[Gemini] ${modelName} hit high demand (attempt ${attempt + 1}): ${err.message}`);
-        }
-    }
-    throw lastError;
-}
+const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
 async function generateContent(prompt) {
-    let lastError = null;
-    for (const modelName of CANDIDATE_MODELS) {
-        try {
-            console.log(`[Gemini] Generating review using: ${modelName}`);
-            return await callModelWithRetry(modelName, prompt);
-        } catch (err) {
-            lastError = err;
-            console.warn(`[Gemini] Model ${modelName} could not complete request. Trying next candidate...`);
+    const model = genAI.getGenerativeModel({
+        model: MODEL_NAME,
+        systemInstruction: SYSTEM_INSTRUCTION
+    });
+
+    try {
+        const result = await model.generateContent(prompt);
+        return result.response.text();
+    } catch (err) {
+        const isTransient = err.message && (
+            err.message.includes("503") || 
+            err.message.includes("high demand") || 
+            err.message.includes("429") ||
+            err.message.includes("ResourceExhausted")
+        );
+
+        // If Google servers hit a temporary high-demand spike, retry once after a short pause
+        if (isTransient) {
+            console.log(`[Gemini] Temporary high demand on ${MODEL_NAME}. Retrying once after 1200ms...`);
+            await new Promise(resolve => setTimeout(resolve, 1200));
+            try {
+                const retryResult = await model.generateContent(prompt);
+                return retryResult.response.text();
+            } catch (retryErr) {
+                console.error(`[Gemini] Retry failed due to high demand: ${retryErr.message}`);
+                throw new Error("Google Gemini is currently experiencing high demand. Please try clicking 'Review Code' again in a moment.");
+            }
         }
+
+        console.error(`[Gemini] Request failed: ${err.message}`);
+        throw err;
     }
-    throw lastError;
 }
 
 module.exports = generateContent;
