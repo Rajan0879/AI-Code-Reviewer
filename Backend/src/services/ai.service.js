@@ -38,31 +38,63 @@ Output Structure:
 💡 Improvements & Technical Explanation
 `;
 
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
-const FALLBACK_MODEL = "gemini-1.5-flash";
+// Candidate models in preference order
+const CANDIDATE_MODELS = [
+    process.env.GEMINI_MODEL || "gemini-3.8-flash",
+    "gemini-3.8-pro",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro"
+].filter(Boolean);
 
-async function generateContent(prompt) {
-    try {
-        const model = genAI.getGenerativeModel({
-            model: PRIMARY_MODEL,
-            systemInstruction: SYSTEM_INSTRUCTION
-        });
-        const result = await model.generateContent(prompt);
-        return result.response.text();
-    } catch (primaryError) {
-        console.warn(`Primary model (${PRIMARY_MODEL}) error: ${primaryError.message}. Retrying with fallback (${FALLBACK_MODEL})...`);
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function callModelWithRetry(modelName, prompt, maxRetries = 2) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const fallbackModel = genAI.getGenerativeModel({
-                model: FALLBACK_MODEL,
+            if (attempt > 0) {
+                const backoffMs = attempt * 1500;
+                console.log(`[Gemini] Retrying ${modelName} (attempt ${attempt + 1}) after ${backoffMs}ms...`);
+                await wait(backoffMs);
+            }
+            const model = genAI.getGenerativeModel({
+                model: modelName,
                 systemInstruction: SYSTEM_INSTRUCTION
             });
-            const fallbackResult = await fallbackModel.generateContent(prompt);
-            return fallbackResult.response.text();
-        } catch (fallbackError) {
-            console.error(`Fallback model also failed: ${fallbackError.message}`);
-            throw primaryError;
+            const result = await model.generateContent(prompt);
+            return result.response.text();
+        } catch (err) {
+            lastError = err;
+            const isTransient = err.message && (
+                err.message.includes("503") || 
+                err.message.includes("high demand") || 
+                err.message.includes("ResourceExhausted") || 
+                err.message.includes("429")
+            );
+            
+            // If it's a 404 model not found or invalid key, break early
+            if (!isTransient) {
+                console.warn(`[Gemini] ${modelName} returned permanent error: ${err.message}`);
+                break;
+            }
+            console.warn(`[Gemini] ${modelName} hit high demand (attempt ${attempt + 1}): ${err.message}`);
         }
     }
+    throw lastError;
+}
+
+async function generateContent(prompt) {
+    let lastError = null;
+    for (const modelName of CANDIDATE_MODELS) {
+        try {
+            console.log(`[Gemini] Generating review using: ${modelName}`);
+            return await callModelWithRetry(modelName, prompt);
+        } catch (err) {
+            lastError = err;
+            console.warn(`[Gemini] Model ${modelName} could not complete request. Trying next candidate...`);
+        }
+    }
+    throw lastError;
 }
 
 module.exports = generateContent;

@@ -150,7 +150,16 @@ export default function ReviewStudioPage({
       console.error('Code review failed:', err);
       let msg = 'Failed to generate review. Please check your network connection or try again.';
       if (err.response && err.response.data) {
-        msg = typeof err.response.data === 'string' ? err.response.data : JSON.stringify(err.response.data);
+        if (typeof err.response.data === 'string') {
+          msg = err.response.data;
+        } else if (err.response.data.message) {
+          msg = err.response.data.message;
+        } else if (err.response.data.error) {
+          msg = err.response.data.error;
+        }
+      }
+      if (msg.includes('503') || msg.includes('high demand') || msg.includes('Service Unavailable')) {
+        msg = 'Google Gemini is currently experiencing high demand. Please try clicking "Review Code" again in a moment.';
       }
       setErrorMsg(msg);
     } finally {
