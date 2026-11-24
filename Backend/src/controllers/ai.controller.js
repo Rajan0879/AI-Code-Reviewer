@@ -18,3 +18,19 @@ module.exports.getReview = async (req, res) => {
         });
     }
 };
+
+module.exports.getModels = async (req, res) => {
+    try {
+        const models = await aiService.fetchSupportedModels();
+        res.json({
+            status: "success",
+            modelsCount: models.length,
+            models: models
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: "error",
+            message: error.message
+        });
+    }
+};

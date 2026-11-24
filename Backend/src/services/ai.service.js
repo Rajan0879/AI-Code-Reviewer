@@ -38,41 +38,83 @@ Output Structure:
 💡 Improvements & Technical Explanation
 `;
 
-const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+let cachedModels = null;
+let lastWorkingModel = null;
 
-async function generateContent(prompt) {
-    const model = genAI.getGenerativeModel({
-        model: MODEL_NAME,
-        systemInstruction: SYSTEM_INSTRUCTION
-    });
-
+/**
+ * Dynamically queries Google's ModelService to find models that support generateContent
+ */
+async function fetchSupportedModels() {
+    if (cachedModels && cachedModels.length > 0) {
+        return cachedModels;
+    }
     try {
-        const result = await model.generateContent(prompt);
-        return result.response.text();
-    } catch (err) {
-        const isTransient = err.message && (
-            err.message.includes("503") || 
-            err.message.includes("high demand") || 
-            err.message.includes("429") ||
-            err.message.includes("ResourceExhausted")
-        );
-
-        // If Google servers hit a temporary high-demand spike, retry once after a short pause
-        if (isTransient) {
-            console.log(`[Gemini] Temporary high demand on ${MODEL_NAME}. Retrying once after 1200ms...`);
-            await new Promise(resolve => setTimeout(resolve, 1200));
-            try {
-                const retryResult = await model.generateContent(prompt);
-                return retryResult.response.text();
-            } catch (retryErr) {
-                console.error(`[Gemini] Retry failed due to high demand: ${retryErr.message}`);
-                throw new Error("Google Gemini is currently experiencing high demand. Please try clicking 'Review Code' again in a moment.");
-            }
+        const apiKey = process.env.GOOGLE_GEMINI_KEY;
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        if (!res.ok) {
+            console.warn(`Failed to list models from Google: HTTP ${res.status}`);
+            return [];
         }
-
-        console.error(`[Gemini] Request failed: ${err.message}`);
-        throw err;
+        const data = await res.json();
+        const available = (data.models || [])
+            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
+            .map(m => m.name.replace("models/", ""));
+        
+        console.log("[Gemini] Active generateContent models for key:", available);
+        cachedModels = available;
+        return available;
+    } catch (e) {
+        console.error("[Gemini] Could not fetch models list:", e.message);
+        return [];
     }
 }
 
+async function generateContent(prompt) {
+    // 1. Determine model list: user override -> last working -> dynamic list -> default fallback
+    const dynamicModels = await fetchSupportedModels();
+    
+    const candidateList = [
+        process.env.GEMINI_MODEL,
+        lastWorkingModel,
+        "gemini-3.8-flash",
+        "gemini-2.5-flash",
+        ...dynamicModels
+    ].filter(Boolean);
+
+    // Remove duplicates
+    const uniqueCandidates = Array.from(new Set(candidateList));
+    console.log("[Gemini] Testing candidate models in order:", uniqueCandidates);
+
+    let lastError = null;
+
+    for (const modelName of uniqueCandidates) {
+        try {
+            console.log(`[Gemini] Attempting review with: ${modelName}`);
+            const model = genAI.getGenerativeModel({
+                model: modelName,
+                systemInstruction: SYSTEM_INSTRUCTION
+            });
+
+            const result = await model.generateContent(prompt);
+            const text = result.response.text();
+
+            // Remember this working model for instant reuse next time
+            lastWorkingModel = modelName;
+            console.log(`[Gemini] Review successfully generated using: ${modelName}`);
+            return text;
+        } catch (err) {
+            lastError = err;
+            console.warn(`[Gemini] Model ${modelName} failed (${err.message}). Trying next candidate...`);
+            
+            // If the key itself is invalid (400/401/403), stop immediately
+            if (err.message && (err.message.includes("API_KEY_INVALID") || err.message.includes("401") || err.message.includes("403"))) {
+                throw err;
+            }
+        }
+    }
+
+    throw lastError || new Error("All available Gemini models are currently busy or unavailable. Please try again shortly.");
+}
+
 module.exports = generateContent;
+module.exports.fetchSupportedModels = fetchSupportedModels;
